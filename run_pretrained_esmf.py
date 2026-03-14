@@ -92,6 +92,12 @@ def main() -> int:
         action="store_true",
         help="Use deterministic CuDNN (may reduce speed).",
     )
+    parser.add_argument(
+        "--top_k",
+        type=int,
+        default=50,
+        help="Number of top attention values to save per head in VizFold text files.",
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.fasta):
@@ -125,6 +131,7 @@ def main() -> int:
         layers=args.layers,
         heads=args.heads,
         save_fp16=args.save_fp16,
+        top_k=args.top_k,
     )
     print(f"Done. Outputs in {args.out}")
     print(f"  attention layers: {result.get('attention_layers', 0)}, "

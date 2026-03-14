@@ -17,6 +17,7 @@ from vizfold.backends.esmfold.trace_adapter import (
     write_structure,
     write_traces,
     write_trace_summary,
+    write_attention_txt,
 )
 
 # HuggingFace ESMFold
@@ -137,6 +138,7 @@ class ESMFoldRunner:
         layers: Optional[str] = None,
         heads: Optional[str] = None,
         save_fp16: bool = False,
+        top_k: int = 50,
         log_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -229,6 +231,14 @@ class ESMFoldRunner:
             except Exception:
                 pass
 
+            # VizFold-compatible text-file attention export
+            if want_attn and collector.attention:
+                txt_dir = write_attention_txt(out_dir, collector, top_k=top_k)
+                if txt_dir:
+                    attn_files = [f for f in os.listdir(txt_dir) if f.endswith(".txt")]
+                    shapes_recorded["attention_files"] = attn_files
+                    log(f"VizFold text attention saved to {txt_dir} ({len(attn_files)} files)")
+
         layer_count = max(len(collector.attention), len(collector.activations), 1)
         head_count = 0
         if collector.attention:
@@ -253,6 +263,7 @@ class ESMFoldRunner:
             seed=self.seed,
             deterministic=self.deterministic,
             save_fp16=save_fp16,
+            top_k=top_k,
         )
         log("meta.json written.")
 

@@ -49,6 +49,7 @@ def build_meta(
     seed: Optional[int] = None,
     deterministic: bool = False,
     save_fp16: bool = False,
+    top_k: int = 50,
     repo_path: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
@@ -68,6 +69,7 @@ def build_meta(
         "head_count": head_count,
         "trace_mode": trace_mode,
         "tensor_format": "fp16" if save_fp16 else "fp32",
+        "top_k": top_k,
         "shapes_recorded": shapes_recorded,
     }
     if fasta_path:

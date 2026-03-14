@@ -99,6 +99,59 @@ def write_traces(
     return attention_index, activations_index
 
 
+def write_attention_txt(
+    out_dir: str,
+    collector: ESMFoldTraceCollector,
+    top_k: int = 50,
+) -> Optional[str]:
+    """
+    Write VizFold-compatible text-file attention maps from collector.
+
+    Converts each [B, H, N, N] attention tensor into the standard
+    msa_row_attn_layer*.txt format used by VizFold visualization tools
+    (PyMOL scripts, arc diagrams, etc.).
+
+    Args:
+        out_dir: Root output directory. Files go to out_dir/attention_files/.
+        collector: ESMFoldTraceCollector with populated .attention dict.
+        top_k: Number of top attention values to save per head.
+
+    Returns:
+        Path to the attention_files directory, or None if no attention data.
+    """
+    import numpy as np
+    from openfold.model.evoformer import save_attention_topk
+
+    if not collector.attention:
+        return None
+
+    attn_dir = os.path.join(out_dir, "attention_files")
+    os.makedirs(attn_dir, exist_ok=True)
+
+    for key, t in collector.attention.items():
+        # key format: "layer_000", "layer_001", ...
+        layer_idx = int(key.split("_")[-1])
+
+        # t shape: [B, H, N, N] — convert to numpy
+        arr = t.float().cpu().numpy()
+
+        # save_attention_topk expects a dict with the array directly,
+        # shape (M, N, S, S) for msa_row_attn where M=batch, N=heads
+        attn_dict = {key: arr}
+
+        save_attention_topk(
+            attention_dict=attn_dict,
+            save_dir=attn_dir,
+            layer_name=key,
+            layer_idx=layer_idx,
+            attn_type="msa_row_attn",
+            triangle_residue_idx=None,
+            top_k=top_k,
+        )
+
+    return attn_dir
+
+
 def write_trace_summary(
     out_dir: str,
     collector: "ESMFoldTraceCollector",
@@ -162,6 +215,7 @@ def build_and_write_meta(
     seed: Optional[int] = None,
     deterministic: bool = False,
     save_fp16: bool = False,
+    top_k: int = 50,
 ) -> str:
     meta = build_meta(
         backend="esmfold",
@@ -175,10 +229,11 @@ def build_and_write_meta(
         layer_count=layer_count,
         head_count=head_count,
         trace_mode=trace_mode,
-        trace_formats=["pt"],  # VizFold trace format
+        trace_formats=["pt", "txt"],
         shapes_recorded=shapes_recorded,
         seed=seed,
         deterministic=deterministic,
         save_fp16=save_fp16,
+        top_k=top_k,
     )
     return write_meta(meta, out_dir)
