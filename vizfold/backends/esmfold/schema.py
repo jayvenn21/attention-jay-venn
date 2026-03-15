@@ -68,6 +68,7 @@ def build_meta(
         "layer_count": layer_count,
         "head_count": head_count,
         "trace_mode": trace_mode,
+        "trace_formats": trace_formats,
         "tensor_format": "fp16" if save_fp16 else "fp32",
         "top_k": top_k,
         "shapes_recorded": shapes_recorded,
