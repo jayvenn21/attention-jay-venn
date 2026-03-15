@@ -124,9 +124,15 @@ class ESMFoldTraceCollector:
         orig_forward = self_attn.forward
 
         def patched_forward(*args, **kwargs):
-            # Force output_attentions so the attention weights are computed
-            # and included in the return tuple.
-            kwargs["output_attentions"] = True
+            # EsmAttention passes output_attentions as the 7th positional arg
+            # (index 6) to EsmSelfAttention.forward(). Adding it to kwargs too
+            # causes "multiple values for argument" TypeError, so override
+            # positionally when present, otherwise inject via kwargs.
+            OA_POS = 6
+            if len(args) > OA_POS:
+                args = args[:OA_POS] + (True,) + args[OA_POS + 1:]
+            else:
+                kwargs["output_attentions"] = True
             return orig_forward(*args, **kwargs)
 
         self_attn.forward = patched_forward
