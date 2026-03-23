@@ -124,7 +124,7 @@ class ESMFoldRunner:
             warnings.warn("Deterministic mode may reduce speed.", UserWarning)
 
         self._tokenizer = AutoTokenizer.from_pretrained(self.model_name)
-        self._model = EsmForProteinFolding.from_pretrained(self.model_name)
+        self._model = EsmForProteinFolding.from_pretrained(self.model_name, use_safetensors=True)
         self._model = self._model.eval()
         dtype_t = torch.float16 if self.dtype == "float16" else torch.float32
         self._model = self._model.to(device=self.device, dtype=dtype_t)
@@ -204,6 +204,15 @@ class ESMFoldRunner:
         if trace_mode != "none":
             collector.remove_hooks()
 
+        # Check if the output object contains the single representations
+        if hasattr(out, 's_s') and out.s_s is not None:
+            # Move to CPU and remove the batch dimension -> [seq_len, hidden_dim]
+            single_reps = out.s_s.squeeze(0).cpu()
+
+            log(f"Extracted folding trunk s_s activations: {single_reps.shape}")
+        else:
+            log("Warning: out.s_s not found. Folding trunk single representations missing.")
+
         log(f"Forward pass complete. Captured {len(collector.attention)} attention layers, "
             f"{len(collector.activations)} activation layers.")
 
@@ -228,8 +237,8 @@ class ESMFoldRunner:
                 shapes_recorded["activations"][k] = v.get("shape", [])
             try:
                 write_trace_summary(out_dir, collector)
-            except Exception:
-                pass
+            except Exception as e:
+                log(f"Warning: trace summary failed: {e}")
 
             # VizFold-compatible text-file attention export
             if want_attn and collector.attention:
@@ -239,7 +248,7 @@ class ESMFoldRunner:
                     shapes_recorded["attention_files"] = attn_files
                     log(f"VizFold text attention saved to {txt_dir} ({len(attn_files)} files)")
 
-        layer_count = max(len(collector.attention), len(collector.activations), 1)
+        layer_count = len(collector.attention) if trace_mode != "none" else 0
         head_count = 0
         if collector.attention:
             first_attn = next(iter(collector.attention.values()))
