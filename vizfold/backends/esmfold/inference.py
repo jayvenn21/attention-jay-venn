@@ -201,17 +201,15 @@ class ESMFoldRunner:
         with torch.no_grad():
             out = model(input_ids=input_ids, attention_mask=attention_mask)
 
+        single_reps = None
         if trace_mode != "none":
             collector.remove_hooks()
 
-        # Check if the output object contains the single representations
-        if hasattr(out, 's_s') and out.s_s is not None:
-            # Move to CPU and remove the batch dimension -> [seq_len, hidden_dim]
-            single_reps = out.s_s.squeeze(0).cpu()
-
-            log(f"Extracted folding trunk s_s activations: {single_reps.shape}")
-        else:
-            log("Warning: out.s_s not found. Folding trunk single representations missing.")
+            if hasattr(out, 's_s') and out.s_s is not None:
+                single_reps = out.s_s.squeeze(0).cpu()
+                log(f"[{self.model_name}] [{trace_mode}] Extracted folding trunk s_s: {single_reps.shape}")
+            else:
+                log(f"[{self.model_name}] [{trace_mode}] out.s_s not found — folding trunk single representations missing.")
 
         log(f"Forward pass complete. Captured {len(collector.attention)} attention layers, "
             f"{len(collector.activations)} activation layers.")
@@ -235,6 +233,16 @@ class ESMFoldRunner:
                 shapes_recorded["attention"][k] = v.get("shape", [])
             for k, v in act_idx.items():
                 shapes_recorded["activations"][k] = v.get("shape", [])
+            if single_reps is not None:
+                s_s_path = os.path.join(out_dir, "trace", "activations", "folding_trunk_s_s.pt")
+                torch.save(single_reps if not save_fp16 else single_reps.half(), s_s_path)
+                shapes_recorded["activations"]["folding_trunk_s_s"] = {
+                    "path": os.path.relpath(s_s_path, out_dir),
+                    "dtype": str(single_reps.dtype),
+                    "shape": list(single_reps.shape),
+                }
+                log(f"Folding trunk s_s written to {s_s_path}")
+
             try:
                 write_trace_summary(out_dir, collector)
             except Exception as e:
