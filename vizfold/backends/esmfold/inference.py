@@ -17,6 +17,7 @@ from vizfold.backends.esmfold.trace_adapter import (
     write_structure,
     write_traces,
     write_trace_summary,
+    write_attention_txt,
 )
 
 # HuggingFace ESMFold
@@ -137,6 +138,7 @@ class ESMFoldRunner:
         layers: Optional[str] = None,
         heads: Optional[str] = None,
         save_fp16: bool = False,
+        top_k: int = 50,
         log_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -199,17 +201,18 @@ class ESMFoldRunner:
         with torch.no_grad():
             out = model(input_ids=input_ids, attention_mask=attention_mask)
 
+        single_reps = None
         if trace_mode != "none":
             collector.remove_hooks()
 
-        # Check if the output object contains the single representations
-        if hasattr(out, 's_s') and out.s_s is not None:
-            # Move to CPU and remove the batch dimension -> [seq_len, hidden_dim]
-            single_reps = out.s_s.squeeze(0).cpu()
-
-            log(f"Extracted folding trunk s_s activations: {single_reps.shape}")
-        else:
-            log("Warning: out.s_s not found. Folding trunk single representations missing.")
+            # out.s_s: folding trunk single representations [B, N, 1024].
+            # These are the per-residue embeddings produced by ESMFold's
+            # structure module which complements the ESM-2 encoder traces.
+            if hasattr(out, 's_s') and out.s_s is not None:
+                single_reps = out.s_s.squeeze(0).cpu()
+                log(f"[{self.model_name}] [{trace_mode}] Extracted folding trunk s_s: {single_reps.shape}")
+            else:
+                log(f"[{self.model_name}] [{trace_mode}] out.s_s not found — folding trunk single representations missing.")
 
         log(f"Forward pass complete. Captured {len(collector.attention)} attention layers, "
             f"{len(collector.activations)} activation layers.")
@@ -233,10 +236,28 @@ class ESMFoldRunner:
                 shapes_recorded["attention"][k] = v.get("shape", [])
             for k, v in act_idx.items():
                 shapes_recorded["activations"][k] = v.get("shape", [])
+            if single_reps is not None:
+                s_s_path = os.path.join(out_dir, "trace", "activations", "folding_trunk_s_s.pt")
+                torch.save(single_reps if not save_fp16 else single_reps.half(), s_s_path)
+                shapes_recorded["activations"]["folding_trunk_s_s"] = {
+                    "path": os.path.relpath(s_s_path, out_dir),
+                    "dtype": str(single_reps.dtype),
+                    "shape": list(single_reps.shape),
+                }
+                log(f"Folding trunk s_s written to {s_s_path}")
+
             try:
                 write_trace_summary(out_dir, collector)
             except Exception as e:
                 log(f"Warning: trace summary failed: {e}")
+
+            # VizFold-compatible text-file attention export
+            if want_attn and collector.attention:
+                txt_dir = write_attention_txt(out_dir, collector, top_k=top_k)
+                if txt_dir:
+                    attn_files = [f for f in os.listdir(txt_dir) if f.endswith(".txt")]
+                    shapes_recorded["attention_files"] = attn_files
+                    log(f"VizFold text attention saved to {txt_dir} ({len(attn_files)} files)")
 
         layer_count = len(collector.attention) if trace_mode != "none" else 0
         head_count = 0
@@ -262,6 +283,7 @@ class ESMFoldRunner:
             seed=self.seed,
             deterministic=self.deterministic,
             save_fp16=save_fp16,
+            top_k=top_k,
         )
         log("meta.json written.")
 
@@ -291,8 +313,13 @@ class ESMFoldRunner:
             log("Warning: no positions in model output; structure/ may be incomplete.")
             return pdb_str, coords
 
+        # Fallback chain: full OpenFold PDB conversion → CA-only minimal PDB.
+        # When transformers bundles openfold_utils we get proper all-atom PDB;
+        # otherwise we write a CA-only PDB so downstream tools still have geometry.
         try:
             if atom14_to_atom37 and OFProtein is not None and to_pdb is not None:
+                # ESMFold returns positions as [recycling_iters, B, N, 14, 3];
+                # take the last iteration for the final refined structure.
                 pos = positions[-1] if positions.dim() == 5 else positions
                 final_atom37 = atom14_to_atom37(pos, out)
                 coords = final_atom37

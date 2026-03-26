@@ -17,6 +17,7 @@ import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
+import inspect
 import torch.nn as nn
 
 
@@ -122,11 +123,15 @@ class ESMFoldTraceCollector:
         directly to get the full tuple.
         """
         orig_forward = self_attn.forward
+        params = list(inspect.signature(orig_forward).parameters)
+        # Find output_attentions position by name — robust to signature changes
+        oa_pos = params.index("output_attentions") if "output_attentions" in params else -1
 
         def patched_forward(*args, **kwargs):
-            # Force output_attentions so the attention weights are computed
-            # and included in the return tuple.
-            kwargs["output_attentions"] = True
+            if oa_pos >= 0 and oa_pos < len(args):
+                args = args[:oa_pos] + (True,) + args[oa_pos + 1:]
+            else:
+                kwargs["output_attentions"] = True
             return orig_forward(*args, **kwargs)
 
         self_attn.forward = patched_forward
