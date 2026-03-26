@@ -205,6 +205,9 @@ class ESMFoldRunner:
         if trace_mode != "none":
             collector.remove_hooks()
 
+            # out.s_s: folding trunk single representations [B, N, 1024].
+            # These are the per-residue embeddings produced by ESMFold's
+            # structure module which complements the ESM-2 encoder traces.
             if hasattr(out, 's_s') and out.s_s is not None:
                 single_reps = out.s_s.squeeze(0).cpu()
                 log(f"[{self.model_name}] [{trace_mode}] Extracted folding trunk s_s: {single_reps.shape}")
@@ -310,8 +313,13 @@ class ESMFoldRunner:
             log("Warning: no positions in model output; structure/ may be incomplete.")
             return pdb_str, coords
 
+        # Fallback chain: full OpenFold PDB conversion → CA-only minimal PDB.
+        # When transformers bundles openfold_utils we get proper all-atom PDB;
+        # otherwise we write a CA-only PDB so downstream tools still have geometry.
         try:
             if atom14_to_atom37 and OFProtein is not None and to_pdb is not None:
+                # ESMFold returns positions as [recycling_iters, B, N, 14, 3];
+                # take the last iteration for the final refined structure.
                 pos = positions[-1] if positions.dim() == 5 else positions
                 final_atom37 = atom14_to_atom37(pos, out)
                 coords = final_atom37
