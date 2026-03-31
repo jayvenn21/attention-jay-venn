@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
-from vizfold.backends.esmfold.hooks import ESMFoldTraceCollector
+from vizfold.backends.esmfold.hooks import ESMFoldTraceCollector, StructureModuleTraceCollector
 from vizfold.backends.esmfold.schema import _read_fasta_and_hash
 from vizfold.backends.esmfold.trace_adapter import (
     build_and_write_meta,
@@ -139,6 +139,7 @@ class ESMFoldRunner:
         heads: Optional[str] = None,
         save_fp16: bool = False,
         top_k: int = 50,
+        structure_traces: bool = False,
         log_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
@@ -147,6 +148,8 @@ class ESMFoldRunner:
         trace_mode: "attention" | "activations" | "attention+activations" | "none"
         layers: "all" or "0,1,2" or "0:12"
         heads: "all" or "0,1,2"
+        structure_traces: if True, capture IPA attention weights and per-recycle
+            backbone positions from the folding trunk structure module.
         """
         os.makedirs(out_dir, exist_ok=True)
         if log_path is None:
@@ -192,11 +195,17 @@ class ESMFoldRunner:
         if attention_mask is not None:
             attention_mask = attention_mask.to(device=self.device)
 
-        # HF EsmForProteinFolding does NOT accept output_attentions/output_hidden_states.
-        # Hooks on model.esm capture traces during the single forward pass.
+        # Hooks on model.esm capture ESM-2 encoder traces during forward.
         if trace_mode != "none":
             esm_trunk = getattr(model, "esm", model)
             collector.register_hooks(esm_trunk)
+
+        # Structure module hooks: IPA attention + per-recycle backbone
+        sm_collector = None
+        if structure_traces:
+            sm_collector = StructureModuleTraceCollector()
+            sm_collector.register_hooks(model)
+            log("Structure module hooks registered (IPA attention + backbone).")
 
         with torch.no_grad():
             out = model(input_ids=input_ids, attention_mask=attention_mask)
@@ -207,12 +216,17 @@ class ESMFoldRunner:
 
             # out.s_s: folding trunk single representations [B, N, 1024].
             # These are the per-residue embeddings produced by ESMFold's
-            # structure module which complements the ESM-2 encoder traces.
+            # structure module, complementing the ESM-2 encoder traces.
             if hasattr(out, 's_s') and out.s_s is not None:
                 single_reps = out.s_s.squeeze(0).cpu()
                 log(f"[{self.model_name}] [{trace_mode}] Extracted folding trunk s_s: {single_reps.shape}")
             else:
                 log(f"[{self.model_name}] [{trace_mode}] out.s_s not found — folding trunk single representations missing.")
+
+        if sm_collector is not None:
+            sm_collector.remove_hooks()
+            log(f"Structure module traces: {len(sm_collector.ipa_attention)} IPA blocks, "
+                f"{len(sm_collector.backbone_positions)} recycle iterations.")
 
         log(f"Forward pass complete. Captured {len(collector.attention)} attention layers, "
             f"{len(collector.activations)} activation layers.")
@@ -258,6 +272,44 @@ class ESMFoldRunner:
                     attn_files = [f for f in os.listdir(txt_dir) if f.endswith(".txt")]
                     shapes_recorded["attention_files"] = attn_files
                     log(f"VizFold text attention saved to {txt_dir} ({len(attn_files)} files)")
+
+        # Write structure module traces (IPA attention + backbone per recycle)
+        if sm_collector is not None:
+            sm_dir = os.path.join(out_dir, "trace", "structure_module")
+            ipa_dir = os.path.join(sm_dir, "ipa_attention")
+            bb_dir = os.path.join(sm_dir, "backbone")
+            os.makedirs(ipa_dir, exist_ok=True)
+            os.makedirs(bb_dir, exist_ok=True)
+
+            shapes_recorded["structure_module"] = {"ipa_attention": {}, "backbone": {}}
+
+            for key, t in sm_collector.ipa_attention.items():
+                path = os.path.join(ipa_dir, f"{key}.pt")
+                torch.save(t.cpu() if not save_fp16 else t.cpu().half(), path)
+                shapes_recorded["structure_module"]["ipa_attention"][key] = {
+                    "path": os.path.relpath(path, out_dir),
+                    "shape": list(t.shape),
+                }
+
+            for key, t in sm_collector.backbone_positions.items():
+                path = os.path.join(bb_dir, f"{key}_positions.pt")
+                torch.save(t if not save_fp16 else t.half(), path)
+                shapes_recorded["structure_module"]["backbone"][f"{key}_positions"] = {
+                    "path": os.path.relpath(path, out_dir),
+                    "shape": list(t.shape),
+                }
+
+            for key, t in sm_collector.sm_states.items():
+                path = os.path.join(bb_dir, f"{key}_states.pt")
+                torch.save(t if not save_fp16 else t.half(), path)
+                shapes_recorded["structure_module"]["backbone"][f"{key}_states"] = {
+                    "path": os.path.relpath(path, out_dir),
+                    "shape": list(t.shape),
+                }
+
+            log(f"Structure module traces written: "
+                f"{len(sm_collector.ipa_attention)} IPA attention maps, "
+                f"{len(sm_collector.backbone_positions)} backbone snapshots.")
 
         layer_count = len(collector.attention) if trace_mode != "none" else 0
         head_count = 0
