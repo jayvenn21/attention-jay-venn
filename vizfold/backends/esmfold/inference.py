@@ -199,6 +199,10 @@ class ESMFoldRunner:
         if trace_mode != "none":
             esm_trunk = getattr(model, "esm", model)
             collector.register_hooks(esm_trunk)
+            # Hook the folding trunk to catch recycling iterations
+            if hasattr(model, "trunk"):
+                trunk_handle = model.trunk.register_forward_hook(collector._make_trunk_hook())
+                collector._handles.append(trunk_handle)
 
         # Structure module hooks: IPA attention + per-recycle backbone
         sm_collector = None
@@ -213,6 +217,14 @@ class ESMFoldRunner:
         single_reps = None
         if trace_mode != "none":
             collector.remove_hooks()
+
+            # Archive the recycled s_s and s_z tensors we caught
+            if want_act and len(collector.recycled_s_s) > 0:
+                num_iters = len(collector.recycled_s_s)
+                log(f"[{self.model_name}] [{trace_mode}] Captured {num_iters} trunk recycling iterations.")
+                for i in range(num_iters):
+                    collector.activations[f"recycle_{i}_s_s"] = collector.recycled_s_s[i]
+                    collector.activations[f"recycle_{i}_s_z"] = collector.recycled_s_z[i]
 
             # out.s_s: folding trunk single representations [B, N, 1024].
             # These are the per-residue embeddings produced by ESMFold's

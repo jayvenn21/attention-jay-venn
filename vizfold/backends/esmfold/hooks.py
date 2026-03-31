@@ -48,6 +48,8 @@ class ESMFoldTraceCollector:
         self.activations: Dict[str, torch.Tensor] = {}
         self._handles: List[Any] = []
         self._patched_forwards: List[Tuple[nn.Module, Callable]] = []
+        self.recycled_s_s: List[torch.Tensor] = []
+        self.recycled_s_z: List[torch.Tensor] = []
 
     def clear(self) -> None:
         self.attention.clear()
@@ -169,6 +171,28 @@ class ESMFoldTraceCollector:
             if h is not None and isinstance(h, torch.Tensor) and h.dim() >= 2:
                 key = f"layer_{layer_idx:03d}"
                 self.activations[key] = h.detach()
+        return hook
+
+    def _make_trunk_hook(self) -> Callable:
+        """Hook that captures s_s and s_z at every recycling iteration."""
+        def hook(module: nn.Module, inp: Any, out: Any) -> None:
+            s_s, s_z = None, None
+
+            # Handle HF returning a tuple (usually s_s is index 0 and s_z is index 1)
+            if isinstance(out, tuple) and len(out) >= 2:
+                s_s, s_z = out[0], out[1]
+            # Handle HF returning a dataclass or object
+            elif hasattr(out, 's_s') and hasattr(out, 's_z'):
+                s_s, s_z = out.s_s, out.s_z
+            # Handle dictionaries
+            elif isinstance(out, dict):
+                s_s, s_z = out.get('s_s'), out.get('s_z')
+
+            if s_s is not None and s_z is not None:
+                # Squeeze out the batch dimension and move to CPU to prevent RAM crashes
+                # s_s shape: [N, 1024] | s_z shape: [N, N, 128]
+                self.recycled_s_s.append(s_s.squeeze(0).cpu().detach())
+                self.recycled_s_z.append(s_z.squeeze(0).cpu().detach())
         return hook
 
 
