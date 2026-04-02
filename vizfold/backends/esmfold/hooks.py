@@ -11,6 +11,12 @@ We capture traces by registering forward hooks on the ESM-2 trunk:
 The ESM-2 tokenizer adds <cls> and <eos> tokens, so attention maps are
 (seq_len+2, seq_len+2). We slice out the special tokens so stored tensors
 are (seq_len, seq_len), matching the FASTA sequence.
+
+Structure module tracing:
+  StructureModuleTraceCollector hooks into model.trunk.structure_module.ipa
+  to capture IPA attention weights [H, N, N] at each block within each
+  recycling iteration, and hooks on trunk.structure_module to capture
+  per-recycle backbone positions and single representations.
 """
 import re
 import warnings
@@ -42,6 +48,8 @@ class ESMFoldTraceCollector:
         self.activations: Dict[str, torch.Tensor] = {}
         self._handles: List[Any] = []
         self._patched_forwards: List[Tuple[nn.Module, Callable]] = []
+        self.recycled_s_s: List[torch.Tensor] = []
+        self.recycled_s_z: List[torch.Tensor] = []
 
     def clear(self) -> None:
         self.attention.clear()
@@ -164,3 +172,154 @@ class ESMFoldTraceCollector:
                 key = f"layer_{layer_idx:03d}"
                 self.activations[key] = h.detach()
         return hook
+
+    def _make_trunk_hook(self) -> Callable:
+        """Hook that captures s_s and s_z at every recycling iteration."""
+        def hook(module: nn.Module, inp: Any, out: Any) -> None:
+            s_s, s_z = None, None
+
+            # Handle HF returning a tuple (usually s_s is index 0 and s_z is index 1)
+            if isinstance(out, tuple) and len(out) >= 2:
+                s_s, s_z = out[0], out[1]
+            # Handle HF returning a dataclass or object
+            elif hasattr(out, 's_s') and hasattr(out, 's_z'):
+                s_s, s_z = out.s_s, out.s_z
+            # Handle dictionaries
+            elif isinstance(out, dict):
+                s_s, s_z = out.get('s_s'), out.get('s_z')
+
+            if s_s is not None and s_z is not None:
+                # Squeeze out the batch dimension and move to CPU to prevent RAM crashes
+                # s_s shape: [N, 1024] | s_z shape: [N, N, 128]
+                self.recycled_s_s.append(s_s.squeeze(0).cpu().detach())
+                self.recycled_s_z.append(s_z.squeeze(0).cpu().detach())
+        return hook
+
+
+class StructureModuleTraceCollector:
+    """
+    Captures IPA attention weights and per-recycling-iteration backbone
+    outputs from the ESMFold structure module.
+
+    Hook targets:
+      - trunk.structure_module.ipa: monkey-patched to stash the softmax
+        attention matrix a [*, H, N, N] before it's consumed internally.
+        Fires num_blocks times per recycle (IPA is a single shared module
+        reused across all structure module blocks).
+      - trunk.structure_module: captures the full output dict per recycle,
+        including stacked positions [num_blocks, B, N, 14, 3], frames,
+        and the final single representation.
+    """
+
+    def __init__(self) -> None:
+        self.ipa_attention: Dict[str, torch.Tensor] = {}
+        self.backbone_positions: Dict[str, torch.Tensor] = {}
+        self.backbone_frames: Dict[str, torch.Tensor] = {}
+        self.sm_states: Dict[str, torch.Tensor] = {}
+        self._handles: List[Any] = []
+        self._patched_forwards: List[Tuple[nn.Module, Callable]] = []
+        self._recycle_idx = 0
+        self._block_idx = 0
+
+    def clear(self) -> None:
+        self.ipa_attention.clear()
+        self.backbone_positions.clear()
+        self.backbone_frames.clear()
+        self.sm_states.clear()
+        self._recycle_idx = 0
+        self._block_idx = 0
+
+    def register_hooks(self, model: nn.Module) -> None:
+        """
+        Register hooks on model.trunk.structure_module and its IPA submodule.
+
+        Args:
+            model: the full EsmForProteinFolding model (we navigate to trunk).
+        """
+        trunk = getattr(model, "trunk", None)
+        if trunk is None:
+            warnings.warn("model.trunk not found; structure module hooks skipped.", UserWarning)
+            return
+        sm = getattr(trunk, "structure_module", None)
+        if sm is None:
+            warnings.warn("trunk.structure_module not found; hooks skipped.", UserWarning)
+            return
+
+        ipa = getattr(sm, "ipa", None)
+        if ipa is not None:
+            self._patch_ipa(ipa)
+
+        h = sm.register_forward_hook(self._sm_output_hook)
+        self._handles.append(h)
+
+    def _patch_ipa(self, ipa: nn.Module) -> None:
+        """
+        Monkey-patch IPA forward to stash the softmax attention matrix.
+
+        IPA computes a = softmax(scalar_attn + point_attn + pair_bias + mask)
+        but only returns the single-rep update. We intercept a after softmax
+        and store it, keyed by recycle_idx and block_idx.
+
+        ipa.softmax is an nn.Softmax module, so we can't replace it with a
+        plain function (PyTorch __setattr__ rejects non-Module assignments).
+        Instead we wrap it in an nn.Module subclass that captures the output.
+        """
+        orig_forward = ipa.forward
+        orig_softmax_module = ipa.softmax
+        collector = self
+
+        class CapturingSoftmax(nn.Module):
+            def __init__(self, wrapped: nn.Module):
+                super().__init__()
+                self.wrapped = wrapped
+                self.last_a: Optional[torch.Tensor] = None
+
+            def forward(self, x: torch.Tensor) -> torch.Tensor:
+                result = self.wrapped(x)
+                self.last_a = result.detach()
+                return result
+
+        capturing = CapturingSoftmax(orig_softmax_module)
+        ipa.softmax = capturing
+
+        def patched_forward(*args, **kwargs):
+            capturing.last_a = None
+            out = orig_forward(*args, **kwargs)
+            if capturing.last_a is not None:
+                key = f"recycle_{collector._recycle_idx:02d}_block_{collector._block_idx:02d}"
+                collector.ipa_attention[key] = capturing.last_a
+            collector._block_idx += 1
+            return out
+
+        ipa.forward = patched_forward
+        self._patched_forwards.append((ipa, orig_forward))
+        self._orig_softmax = (ipa, orig_softmax_module)
+
+    def _sm_output_hook(self, module: nn.Module, inp: Any, out: Any) -> None:
+        """
+        Fires once per recycling iteration after the full structure module
+        forward (all blocks). Captures backbone positions and states.
+        """
+        key = f"recycle_{self._recycle_idx:02d}"
+        if isinstance(out, dict):
+            if "positions" in out:
+                self.backbone_positions[key] = out["positions"].detach().cpu()
+            if "frames" in out:
+                self.backbone_frames[key] = out["frames"].detach().cpu()
+            if "single" in out:
+                self.sm_states[key] = out["single"].detach().cpu()
+
+        self._recycle_idx += 1
+        self._block_idx = 0
+
+    def remove_hooks(self) -> None:
+        for h in self._handles:
+            h.remove()
+        self._handles.clear()
+        for module, orig_forward in self._patched_forwards:
+            module.forward = orig_forward
+        self._patched_forwards.clear()
+        if hasattr(self, "_orig_softmax"):
+            ipa_mod, orig_sm = self._orig_softmax
+            ipa_mod.softmax = orig_sm
+            del self._orig_softmax

@@ -120,16 +120,64 @@ def test_esmf_smoke_run_cpu(tmp_path=None):
 
     assert (out_dir / "meta.json").exists()
     assert (out_dir / "logs.txt").exists()
-    # Structure may or may not exist depending on model output
     structure_dir = out_dir / "structure"
     if structure_dir.exists():
         assert list(structure_dir.iterdir())
+
+
+def test_esmf_trace_extraction(tmp_path=None):
+    """
+    Run ESMFold with attention+activations, verify trace tensors are
+    written and have the expected shape.
+    """
+    if not _has_esm():
+        return
+    import torch
+
+    if tmp_path is None:
+        tmp_path = Path(tempfile.mkdtemp())
+    fasta = tmp_path / "tiny.fasta"
+    fasta.write_text(">tiny\nMKFLKFSL\n")
+    out_dir = tmp_path / "out_trace"
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(REPO_ROOT / "run_pretrained_esmf.py"),
+            "--fasta", str(fasta),
+            "--out", str(out_dir),
+            "--device", "cpu",
+            "--trace_mode", "attention+activations",
+        ],
+        cwd=REPO_ROOT,
+        capture_output=True,
+        text=True,
+        timeout=600,
+    )
+    assert result.returncode == 0, (result.stdout, result.stderr)
+
+    assert (out_dir / "meta.json").exists()
+    assert (out_dir / "structure" / "predicted.pdb").exists()
+    trace_dir = out_dir / "trace"
+    assert trace_dir.exists()
+
+    pt_files = list(trace_dir.rglob("*.pt"))
+    assert len(pt_files) >= 36, f"Expected >=36 trace tensors, got {len(pt_files)}"
+
+    attn_files = sorted((trace_dir / "attention").glob("*.pt"))
+    assert attn_files, "No attention .pt files found"
+    sample = torch.load(attn_files[0], map_location="cpu", weights_only=True)
+    assert sample.dim() == 4, f"Expected 4D attention tensor [B,H,N,N], got {sample.shape}"
+    assert sample.shape[0] == 1, f"Expected batch dim == 1, got {sample.shape[0]}"
+    assert sample.shape[2] == sample.shape[3], f"Attention map not square: {sample.shape}"
 
 
 # Pytest decorators when available
 if pytest is not None:
     test_esmf_import = pytest.mark.skipif(not _has_esm(), reason="transformers not installed")(test_esmf_import)
     test_esmf_smoke_run_cpu = pytest.mark.skipif(not _has_esm(), reason="transformers not installed")(test_esmf_smoke_run_cpu)
+    test_esmf_trace_extraction = pytest.mark.skipif(not _has_esm(), reason="transformers not installed")(test_esmf_trace_extraction)
 
 
 if __name__ == "__main__":
@@ -182,6 +230,14 @@ if __name__ == "__main__":
     except Exception as e:
         print("FAIL", e)
         failed.append("test_esmf_smoke_run_cpu")
+    # Trace extraction
+    print("test_esmf_trace_extraction ...", end=" ")
+    try:
+        test_esmf_trace_extraction()
+        print("ok (or skipped)")
+    except Exception as e:
+        print("FAIL", e)
+        failed.append("test_esmf_trace_extraction")
     if failed:
         print("Failed:", failed)
         sys.exit(1)

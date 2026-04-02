@@ -98,6 +98,11 @@ def main() -> int:
         default=50,
         help="Number of top attention values to save per head in VizFold text files.",
     )
+    parser.add_argument(
+        "--structure_traces",
+        action="store_true",
+        help="Capture IPA attention weights and per-recycle backbone positions from the structure module.",
+    )
     args = parser.parse_args()
 
     if not os.path.isfile(args.fasta):
@@ -132,6 +137,7 @@ def main() -> int:
         heads=args.heads,
         save_fp16=args.save_fp16,
         top_k=args.top_k,
+        structure_traces=args.structure_traces,
     )
     print(f"Done. Outputs in {args.out}")
     print(f"  attention layers: {result.get('attention_layers', 0)}, "
