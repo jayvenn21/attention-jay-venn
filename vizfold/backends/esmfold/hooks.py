@@ -179,7 +179,7 @@ class ESMFoldTraceCollector:
             if attn_weights.dim() == 4 and attn_weights.shape[-1] >= 3:
                 attn_weights = attn_weights[:, :, 1:-1, 1:-1]
             key = f"layer_{layer_idx:03d}"
-            self.attention[key] = attn_weights.detach()
+            self.attention[key] = attn_weights.detach().cpu()
         return hook
 
     def _make_activation_hook(self, layer_idx: int) -> Callable:
@@ -242,6 +242,11 @@ class ESMFoldTraceCollector:
         """
         Hook for EsmFoldTriangularSelfAttentionBlock.
         Output is (sequence_state, pairwise_state).
+
+        Note: trunk blocks are called once per recycle iteration. Since dict
+        keys are the same across iterations, only the LAST recycle's data
+        is retained. This is intentional — the final iteration is the most
+        refined representation.
         """
         def hook(module: nn.Module, inp: Any, out: Any) -> None:
             if not isinstance(out, tuple) or len(out) < 2:

@@ -4,7 +4,6 @@ ESMFold inference: load model, run forward, optionally extract traces.
 Uses HuggingFace Transformers (EsmForProteinFolding) to avoid OpenFold build dependency.
 """
 import os
-import sys
 import warnings
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -216,7 +215,6 @@ class ESMFoldRunner:
         with torch.no_grad():
             out = model(input_ids=input_ids, attention_mask=attention_mask)
 
-        single_reps = None
         if trace_mode != "none":
             collector.remove_hooks()
 
@@ -228,22 +226,6 @@ class ESMFoldRunner:
                     collector.activations[f"recycle_{i}_s_s"] = collector.recycled_s_s[i]
                     collector.activations[f"recycle_{i}_s_z"] = collector.recycled_s_z[i]
 
-            # out.s_s: folding trunk single representations [B, N, 1024].
-            # out.s_z: folding trunk pair representations [B, N, N, 128].
-            # These are the final evoformer outputs, complementing the
-            # ESM-2 encoder traces.
-            if hasattr(out, 's_s') and out.s_s is not None:
-                single_reps = out.s_s.squeeze(0).cpu()
-                log(f"[{self.model_name}] [{trace_mode}] Extracted folding trunk s_s: {single_reps.shape}")
-            else:
-                log(f"[{self.model_name}] [{trace_mode}] out.s_s not found.")
-
-            pair_reps = None
-            if hasattr(out, 's_z') and out.s_z is not None:
-                pair_reps = out.s_z.squeeze(0).cpu()
-                log(f"[{self.model_name}] [{trace_mode}] Extracted folding trunk s_z: {pair_reps.shape}")
-            else:
-                log(f"[{self.model_name}] [{trace_mode}] out.s_z not found.")
 
         if sm_collector is not None:
             sm_collector.remove_hooks()
@@ -272,40 +254,30 @@ class ESMFoldRunner:
                 shapes_recorded["attention"][k] = v.get("shape", [])
             for k, v in act_idx.items():
                 shapes_recorded["activations"][k] = v.get("shape", [])
-            if single_reps is not None:
-                s_s_path = os.path.join(out_dir, "trace", "activations", "folding_trunk_s_s.pt")
-                torch.save(single_reps if not save_fp16 else single_reps.half(), s_s_path)
-                shapes_recorded["activations"]["folding_trunk_s_s"] = {
-                    "path": os.path.relpath(s_s_path, out_dir),
-                    "dtype": str(single_reps.dtype),
-                    "shape": list(single_reps.shape),
-                }
-                log(f"Folding trunk s_s written to {s_s_path}")
+            # Save per-block evoformer intermediates + final s_s/s_z into trace/trunk/
+            trunk_tensors = dict(collector.trunk_blocks)  # block_000_seq, block_000_pair, ...
+            # Add final trunk outputs: recycled_s_s[-1] == out.s_s (last recycle iteration).
+            # Saved here rather than from out.s_s to avoid a redundant copy.
+            if collector.recycled_s_s:
+                trunk_tensors["s_s"] = collector.recycled_s_s[-1]  # [L, C_s]
+            if collector.recycled_s_z:
+                trunk_tensors["s_z"] = collector.recycled_s_z[-1]  # [L, L, C_z]
 
-            if pair_reps is not None:
-                s_z_path = os.path.join(out_dir, "trace", "activations", "folding_trunk_s_z.pt")
-                torch.save(pair_reps if not save_fp16 else pair_reps.half(), s_z_path)
-                shapes_recorded["activations"]["folding_trunk_s_z"] = {
-                    "path": os.path.relpath(s_z_path, out_dir),
-                    "dtype": str(pair_reps.dtype),
-                    "shape": list(pair_reps.shape),
-                }
-                log(f"Folding trunk s_z written to {s_z_path}")
-
-            # Save per-block evoformer intermediates
-            if collector.trunk_blocks:
+            if trunk_tensors:
                 trunk_dir = os.path.join(out_dir, "trace", "trunk")
                 os.makedirs(trunk_dir, exist_ok=True)
                 shapes_recorded["trunk"] = {}
-                for key, t in collector.trunk_blocks.items():
+                for key, t in trunk_tensors.items():
                     path = os.path.join(trunk_dir, f"{key}.pt")
                     torch.save(t if not save_fp16 else t.half(), path)
                     shapes_recorded["trunk"][key] = {
                         "path": os.path.relpath(path, out_dir),
                         "shape": list(t.shape),
                     }
-                log(f"Evoformer per-block intermediates written to {trunk_dir} "
-                    f"({len(collector.trunk_blocks)} tensors)")
+                log(f"Evoformer trunk intermediates written to {trunk_dir} "
+                    f"({len(trunk_tensors)} tensors: "
+                    f"{len(collector.trunk_blocks)} blocks + "
+                    f"{len(trunk_tensors) - len(collector.trunk_blocks)} final)")
 
             try:
                 write_trace_summary(out_dir, collector)

@@ -15,11 +15,11 @@ Layout:
         layer_000.pt
         ...
       trunk/
-        block_000_seq.pt
-        block_000_pair.pt
+        block_000_seq.pt       [L, C_s]  per-block sequence state (last recycle)
+        block_000_pair.pt      [L, L, C_z]  per-block pair state (last recycle)
         ...
-        s_s.pt
-        s_z.pt
+        s_s.pt                 [L, C_s]  final trunk single representations
+        s_z.pt                 [L, L, C_z]  final trunk pair representations
       index.json
     attention_files/
       msa_row_attn_layer0.txt   (VizFold text format)
@@ -213,9 +213,9 @@ def write_trace_summary(
                 summary["attention"][layer_key] = {
                     "mean": float(block.mean()),
                     "std": float(block.std()),
-                "entropy_proxy": float(ent),
+                    "entropy_proxy": float(ent),
                     "sparsity_proxy": float((block < 1e-5).mean()),
-            }
+                }
     for key, t in collector.activations.items():
         h = t.float().cpu().numpy()
         if h.size == 0:
