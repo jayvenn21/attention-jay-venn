@@ -253,9 +253,9 @@ class ESMFoldTraceCollector:
                 return
             seq_state, pair_state = out[0], out[1]
             if isinstance(seq_state, torch.Tensor):
-                self.trunk_blocks[f"block_{block_idx:03d}_seq"] = seq_state.detach().cpu()
+                self.trunk_blocks[f"block_{block_idx:03d}_seq"] = seq_state.squeeze(0).detach().cpu()
             if isinstance(pair_state, torch.Tensor):
-                self.trunk_blocks[f"block_{block_idx:03d}_pair"] = pair_state.detach().cpu()
+                self.trunk_blocks[f"block_{block_idx:03d}_pair"] = pair_state.squeeze(0).detach().cpu()
         return hook
 
 

@@ -218,15 +218,6 @@ class ESMFoldRunner:
         if trace_mode != "none":
             collector.remove_hooks()
 
-            # Archive the recycled s_s and s_z tensors we caught
-            if want_act and len(collector.recycled_s_s) > 0:
-                num_iters = len(collector.recycled_s_s)
-                log(f"[{self.model_name}] [{trace_mode}] Captured {num_iters} trunk recycling iterations.")
-                for i in range(num_iters):
-                    collector.activations[f"recycle_{i}_s_s"] = collector.recycled_s_s[i]
-                    collector.activations[f"recycle_{i}_s_z"] = collector.recycled_s_z[i]
-
-
         if sm_collector is not None:
             sm_collector.remove_hooks()
             log(f"Structure module traces: {len(sm_collector.ipa_attention)} IPA blocks, "
