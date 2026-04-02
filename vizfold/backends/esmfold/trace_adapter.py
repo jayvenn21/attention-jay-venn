@@ -14,6 +14,12 @@ Layout:
       activations/
         layer_000.pt
         ...
+      trunk/
+        block_000_seq.pt
+        block_000_pair.pt
+        ...
+        s_s.pt
+        s_z.pt
       index.json
     attention_files/
       msa_row_attn_layer0.txt   (VizFold text format)

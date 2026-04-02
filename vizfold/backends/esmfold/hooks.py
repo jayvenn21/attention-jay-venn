@@ -2,11 +2,23 @@
 Hook-based extraction of attention weights and hidden states from HuggingFace ESMFold.
 
 HF EsmForProteinFolding does NOT support output_attentions / output_hidden_states.
-We capture traces by registering forward hooks on the ESM-2 trunk:
+We capture traces by registering forward hooks on three stages:
 
-  Attention weights: hook on each EsmSelfAttention module, monkey-patching
-                     the forward to force attn_weights to be returned.
-  Activations:       hook on each EsmLayer (full transformer block output).
+  1. ESM-2 trunk (model.esm):
+     Attention weights: hook on each EsmSelfAttention module, monkey-patching
+                        the forward to force attn_weights to be returned.
+     Activations:       hook on each EsmLayer (full transformer block output).
+
+  2. Folding trunk (model.trunk):
+     Per-block: hook on each EsmFoldTriangularSelfAttentionBlock to capture
+                sequence_state [B, L, C_s] and pairwise_state [B, L, L, C_z].
+     Final:     capture out.s_s and out.s_z from the model output.
+
+  3. Structure module (model.trunk.structure_module):
+     IPA attention: StructureModuleTraceCollector wraps ipa.softmax to capture
+                    the attention matrix [H, N, N] at each block per recycle.
+     Backbone:      hook on structure_module to capture per-recycle positions
+                    and single representations.
 
 The ESM-2 tokenizer adds <cls> and <eos> tokens, so attention maps are
 (seq_len+2, seq_len+2). We slice out the special tokens so stored tensors
@@ -29,8 +41,8 @@ import torch.nn as nn
 
 class ESMFoldTraceCollector:
     """
-    Collects attention weights and/or hidden states from the ESM-2 trunk
-    inside HuggingFace EsmForProteinFolding.
+    Collects attention weights, hidden states, and folding trunk intermediates
+    from HuggingFace EsmForProteinFolding.
     """
 
     def __init__(
@@ -44,16 +56,22 @@ class ESMFoldTraceCollector:
         self.want_activations = want_activations
         self.layer_indices = layer_indices  # None => all
         self.head_indices = head_indices
+        # ESM-2 encoder outputs
         self.attention: Dict[str, torch.Tensor] = {}
         self.activations: Dict[str, torch.Tensor] = {}
         self._handles: List[Any] = []
         self._patched_forwards: List[Tuple[nn.Module, Callable]] = []
         self.recycled_s_s: List[torch.Tensor] = []
         self.recycled_s_z: List[torch.Tensor] = []
+        # Per-block evoformer intermediates from trunk.blocks[i]
+        self.trunk_blocks: Dict[str, torch.Tensor] = {}
 
     def clear(self) -> None:
         self.attention.clear()
         self.activations.clear()
+        self.recycled_s_s.clear()
+        self.recycled_s_z.clear()
+        self.trunk_blocks.clear()
 
     def _should_store_layer(self, layer_idx: int) -> bool:
         return self.layer_indices is None or layer_idx in self.layer_indices
@@ -193,6 +211,46 @@ class ESMFoldTraceCollector:
                 # s_s shape: [N, 1024] | s_z shape: [N, N, 128]
                 self.recycled_s_s.append(s_s.squeeze(0).cpu().detach())
                 self.recycled_s_z.append(s_z.squeeze(0).cpu().detach())
+        return hook
+
+    # -------------------------------------------------------------------
+    # Per-block evoformer hooks
+    # -------------------------------------------------------------------
+
+    def register_trunk_hooks(self, model: nn.Module) -> None:
+        """
+        Register hooks on each EsmFoldTriangularSelfAttentionBlock inside
+        model.trunk.blocks to capture per-block sequence_state [B, L, C_s]
+        and pairwise_state [B, L, L, C_z].
+
+        Note: these tensors can be large (pair state is L×L×C_z per block).
+        """
+        trunk = getattr(model, "trunk", None)
+        if trunk is None:
+            warnings.warn("model.trunk not found; trunk block hooks skipped.", UserWarning)
+            return
+        blocks = getattr(trunk, "blocks", None)
+        if blocks is None or not isinstance(blocks, nn.ModuleList):
+            warnings.warn("model.trunk.blocks not found; trunk block hooks skipped.", UserWarning)
+            return
+
+        for block_idx, block in enumerate(blocks):
+            h = block.register_forward_hook(self._make_trunk_block_hook(block_idx))
+            self._handles.append(h)
+
+    def _make_trunk_block_hook(self, block_idx: int) -> Callable:
+        """
+        Hook for EsmFoldTriangularSelfAttentionBlock.
+        Output is (sequence_state, pairwise_state).
+        """
+        def hook(module: nn.Module, inp: Any, out: Any) -> None:
+            if not isinstance(out, tuple) or len(out) < 2:
+                return
+            seq_state, pair_state = out[0], out[1]
+            if isinstance(seq_state, torch.Tensor):
+                self.trunk_blocks[f"block_{block_idx:03d}_seq"] = seq_state.detach().cpu()
+            if isinstance(pair_state, torch.Tensor):
+                self.trunk_blocks[f"block_{block_idx:03d}_pair"] = pair_state.detach().cpu()
         return hook
 
 

@@ -203,6 +203,8 @@ class ESMFoldRunner:
             if hasattr(model, "trunk"):
                 trunk_handle = model.trunk.register_forward_hook(collector._make_trunk_hook())
                 collector._handles.append(trunk_handle)
+            # Hook each evoformer block to capture per-block sequence/pair state
+            collector.register_trunk_hooks(model)
 
         # Structure module hooks: IPA attention + per-recycle backbone
         sm_collector = None
@@ -227,13 +229,21 @@ class ESMFoldRunner:
                     collector.activations[f"recycle_{i}_s_z"] = collector.recycled_s_z[i]
 
             # out.s_s: folding trunk single representations [B, N, 1024].
-            # These are the per-residue embeddings produced by ESMFold's
-            # structure module, complementing the ESM-2 encoder traces.
+            # out.s_z: folding trunk pair representations [B, N, N, 128].
+            # These are the final evoformer outputs, complementing the
+            # ESM-2 encoder traces.
             if hasattr(out, 's_s') and out.s_s is not None:
                 single_reps = out.s_s.squeeze(0).cpu()
                 log(f"[{self.model_name}] [{trace_mode}] Extracted folding trunk s_s: {single_reps.shape}")
             else:
-                log(f"[{self.model_name}] [{trace_mode}] out.s_s not found — folding trunk single representations missing.")
+                log(f"[{self.model_name}] [{trace_mode}] out.s_s not found.")
+
+            pair_reps = None
+            if hasattr(out, 's_z') and out.s_z is not None:
+                pair_reps = out.s_z.squeeze(0).cpu()
+                log(f"[{self.model_name}] [{trace_mode}] Extracted folding trunk s_z: {pair_reps.shape}")
+            else:
+                log(f"[{self.model_name}] [{trace_mode}] out.s_z not found.")
 
         if sm_collector is not None:
             sm_collector.remove_hooks()
@@ -271,6 +281,31 @@ class ESMFoldRunner:
                     "shape": list(single_reps.shape),
                 }
                 log(f"Folding trunk s_s written to {s_s_path}")
+
+            if pair_reps is not None:
+                s_z_path = os.path.join(out_dir, "trace", "activations", "folding_trunk_s_z.pt")
+                torch.save(pair_reps if not save_fp16 else pair_reps.half(), s_z_path)
+                shapes_recorded["activations"]["folding_trunk_s_z"] = {
+                    "path": os.path.relpath(s_z_path, out_dir),
+                    "dtype": str(pair_reps.dtype),
+                    "shape": list(pair_reps.shape),
+                }
+                log(f"Folding trunk s_z written to {s_z_path}")
+
+            # Save per-block evoformer intermediates
+            if collector.trunk_blocks:
+                trunk_dir = os.path.join(out_dir, "trace", "trunk")
+                os.makedirs(trunk_dir, exist_ok=True)
+                shapes_recorded["trunk"] = {}
+                for key, t in collector.trunk_blocks.items():
+                    path = os.path.join(trunk_dir, f"{key}.pt")
+                    torch.save(t if not save_fp16 else t.half(), path)
+                    shapes_recorded["trunk"][key] = {
+                        "path": os.path.relpath(path, out_dir),
+                        "shape": list(t.shape),
+                    }
+                log(f"Evoformer per-block intermediates written to {trunk_dir} "
+                    f"({len(collector.trunk_blocks)} tensors)")
 
             try:
                 write_trace_summary(out_dir, collector)
