@@ -1,5 +1,5 @@
 """
-ESMFold backend: inference and trace export for ESMFold (fair-esm).
+ESMFold backend: inference and trace export via HuggingFace Transformers.
 """
 # Lazy import so schema/ can be used without requiring torch/fair-esm
 def __getattr__(name):
