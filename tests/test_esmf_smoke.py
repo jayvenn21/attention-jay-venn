@@ -11,6 +11,7 @@ import os
 import subprocess
 import sys
 import tempfile
+import torch
 from pathlib import Path
 
 # Repo root
@@ -280,5 +281,43 @@ def test_esmfold_backend_smoke(tmp_path):
     sample_tensor = torch.load(os.path.join(root, trace_files[0]))
 
     assert sample_tensor.ndim == 4
+    assert sample_tensor.shape[0] == 1
+    assert sample_tensor.shape[2] == sample_tensor.shape[3]
+
+    def test_esmfold_backend_smoke(tmp_path):
+    output_dir = tmp_path / "test_trace_ci"
+
+    cmd = [
+        sys.executable,
+        "run_pretrained_esmf.py",
+        "--fasta",
+        "examples/monomer/fasta_dir_6KWC/6KWC.fasta",
+        "--out",
+        str(output_dir),
+        "--trace_mode",
+        "attention+activations",
+        "--device",
+        "cpu",
+    ]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+    # expected outputs
+    assert os.path.exists(f"{output_dir}/meta.json")
+    assert os.path.exists(f"{output_dir}/structure/predicted.pdb")
+    assert os.path.exists(f"{output_dir}/trace")
+
+    # collect full tensor paths
+    trace_files = []
+    for root, _, files in os.walk(f"{output_dir}/trace"):
+        trace_files += [
+            os.path.join(root, f) for f in files if f.endswith(".pt")
+        ]
+
+    assert len(trace_files) >= 36
+
+    sample_tensor = torch.load(trace_files[0], map_location="cpu")
+    assert len(sample_tensor.shape) == 4
     assert sample_tensor.shape[0] == 1
     assert sample_tensor.shape[2] == sample_tensor.shape[3]
