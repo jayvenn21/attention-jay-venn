@@ -284,7 +284,7 @@ def test_esmfold_backend_smoke(tmp_path):
     assert sample_tensor.shape[0] == 1
     assert sample_tensor.shape[2] == sample_tensor.shape[3]
 
-    def test_esmfold_backend_smoke(tmp_path):
+def test_esmfold_backend_smoke(tmp_path):
     output_dir = tmp_path / "test_trace_ci"
 
     cmd = [
@@ -308,7 +308,7 @@ def test_esmfold_backend_smoke(tmp_path):
     assert os.path.exists(f"{output_dir}/structure/predicted.pdb")
     assert os.path.exists(f"{output_dir}/trace")
 
-    # collect full tensor paths
+    # collect all trace tensor files
     trace_files = []
     for root, _, files in os.walk(f"{output_dir}/trace"):
         trace_files += [
@@ -317,7 +317,17 @@ def test_esmfold_backend_smoke(tmp_path):
 
     assert len(trace_files) >= 36
 
-    sample_tensor = torch.load(trace_files[0], map_location="cpu")
+    # validate attention tensor shape specifically
+    attention_dir = os.path.join(output_dir, "trace", "attention")
+    attention_files = [
+        os.path.join(attention_dir, f)
+        for f in os.listdir(attention_dir)
+        if f.endswith(".pt")
+    ]
+
+    assert len(attention_files) >= 1
+
+    sample_tensor = torch.load(attention_files[0], map_location="cpu")
     assert len(sample_tensor.shape) == 4
     assert sample_tensor.shape[0] == 1
     assert sample_tensor.shape[2] == sample_tensor.shape[3]
