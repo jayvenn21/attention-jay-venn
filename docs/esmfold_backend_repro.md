@@ -173,7 +173,7 @@ Expected tensor shapes include:
 - activation tensors: `[B, N, D]`
 - pair representations (`s_z`): `[N, N, D]`
 
-If recycling outputs are enabled, they are expected to appear under `trace/activations/` with keys such as:
+If recycling outputs are enabled, they are expected to appear under `trace/trunk/` with keys such as:
 
 - `recycle_*_s_s`
 - `recycle_*_s_z`
