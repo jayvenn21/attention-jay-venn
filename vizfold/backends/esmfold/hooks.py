@@ -209,10 +209,18 @@ class ESMFoldTraceCollector:
         return hook
 
     def _make_activation_hook(self, layer_idx: int) -> Callable:
-        """Hook that captures the transformer layer output (hidden state)."""
+        """Hook that captures the transformer layer output (hidden state).
+
+        Strips the leading <cls> and trailing <eos> special tokens so the
+        activation shape [B, N, D] matches the attention shape [B, H, N, N].
+        """
         def hook(module: nn.Module, inp: Any, out: Any) -> None:
             h = out[0] if isinstance(out, tuple) else out
             if h is not None and isinstance(h, torch.Tensor) and h.dim() >= 2:
+                # Strip <cls> (index 0) and <eos> (index -1) to align with
+                # attention maps which are already sliced to seq_len.
+                if h.dim() == 3 and h.shape[1] >= 3:
+                    h = h[:, 1:-1, :]
                 key = f"layer_{layer_idx:03d}"
                 self.activations[key] = h.detach().cpu()
         return hook
