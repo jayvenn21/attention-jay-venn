@@ -30,12 +30,12 @@ Structure module tracing:
   recycling iteration, and hooks on trunk.structure_module to capture
   per-recycle backbone positions and single representations.
 """
+import inspect
 import re
 import warnings
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import torch
-import inspect
 import torch.nn as nn
 
 
@@ -51,11 +51,13 @@ class ESMFoldTraceCollector:
         want_activations: bool = True,
         layer_indices: Optional[List[int]] = None,
         head_indices: Optional[List[int]] = None,
+        expected_seq_len: Optional[int] = None,
     ):
         self.want_attention = want_attention
         self.want_activations = want_activations
         self.layer_indices = layer_indices  # None => all
         self.head_indices = head_indices
+        self.expected_seq_len = expected_seq_len
         # ESM-2 encoder outputs
         self.attention: Dict[str, torch.Tensor] = {}
         self.activations: Dict[str, torch.Tensor] = {}
@@ -65,6 +67,7 @@ class ESMFoldTraceCollector:
         self.recycled_s_z: List[torch.Tensor] = []
         # Per-block evoformer intermediates from trunk.blocks[i]
         self.trunk_blocks: Dict[str, torch.Tensor] = {}
+        self._slice_validated = False
 
     def clear(self) -> None:
         self.attention.clear()
@@ -72,6 +75,7 @@ class ESMFoldTraceCollector:
         self.recycled_s_s.clear()
         self.recycled_s_z.clear()
         self.trunk_blocks.clear()
+        self._slice_validated = False
 
     def _should_store_layer(self, layer_idx: int) -> bool:
         return self.layer_indices is None or layer_idx in self.layer_indices
@@ -178,6 +182,28 @@ class ESMFoldTraceCollector:
             # Slice out special tokens -> [B, H, N, N]
             if attn_weights.dim() == 4 and attn_weights.shape[-1] >= 3:
                 attn_weights = attn_weights[:, :, 1:-1, 1:-1]
+
+            # Validate that the sliced shape matches expected sequence length
+            if (self.expected_seq_len is not None
+                    and not self._slice_validated
+                    and attn_weights.dim() == 4):
+                actual_n = attn_weights.shape[-1]
+                if actual_n != self.expected_seq_len:
+                    warnings.warn(
+                        f"Attention slice mismatch: after removing special tokens, "
+                        f"attention dimension is {actual_n} but expected sequence "
+                        f"length is {self.expected_seq_len}. Attention maps may be "
+                        f"misaligned with residue indices.",
+                        UserWarning,
+                    )
+                self._slice_validated = True
+
+            # Filter heads if requested, to save memory
+            if self.head_indices is not None:
+                head_dim = 1 if attn_weights.dim() == 4 else 0
+                idx = torch.tensor(self.head_indices, device=attn_weights.device)
+                attn_weights = attn_weights.index_select(head_dim, idx)
+
             key = f"layer_{layer_idx:03d}"
             self.attention[key] = attn_weights.detach().cpu()
         return hook
@@ -188,7 +214,7 @@ class ESMFoldTraceCollector:
             h = out[0] if isinstance(out, tuple) else out
             if h is not None and isinstance(h, torch.Tensor) and h.dim() >= 2:
                 key = f"layer_{layer_idx:03d}"
-                self.activations[key] = h.detach()
+                self.activations[key] = h.detach().cpu()
         return hook
 
     def _make_trunk_hook(self) -> Callable:
@@ -245,8 +271,9 @@ class ESMFoldTraceCollector:
 
         Note: trunk blocks are called once per recycle iteration. Since dict
         keys are the same across iterations, only the LAST recycle's data
-        is retained. This is intentional — the final iteration is the most
-        refined representation.
+        is retained. This matches the behavior of recycled_s_s/s_z where
+        only the final values are used downstream. All recycle iterations
+        are captured in recycled_s_s/recycled_s_z lists for analysis if needed.
         """
         def hook(module: nn.Module, inp: Any, out: Any) -> None:
             if not isinstance(out, tuple) or len(out) < 2:
@@ -269,9 +296,10 @@ class StructureModuleTraceCollector:
         attention matrix a [*, H, N, N] before it's consumed internally.
         Fires num_blocks times per recycle (IPA is a single shared module
         reused across all structure module blocks).
-      - trunk.structure_module: captures the full output dict per recycle,
+      - trunk.structure_module: captures the full output per recycle,
         including stacked positions [num_blocks, B, N, 14, 3], frames,
-        and the final single representation.
+        and the final single representation. Handles both dict and
+        dataclass outputs from HuggingFace.
     """
 
     def __init__(self) -> None:
@@ -358,20 +386,40 @@ class StructureModuleTraceCollector:
         self._patched_forwards.append((ipa, orig_forward))
         self._orig_softmax = (ipa, orig_softmax_module)
 
+    def _extract_from_output(self, out: Any) -> dict:
+        """Extract fields from structure module output (dict or dataclass)."""
+        result = {}
+        # Try dict access first
+        if isinstance(out, dict):
+            for key in ("positions", "frames", "single"):
+                if key in out:
+                    result[key] = out[key]
+        else:
+            # Handle dataclass / namedtuple / object with attributes
+            for key in ("positions", "frames", "single"):
+                val = getattr(out, key, None)
+                if val is not None:
+                    result[key] = val
+        return result
+
     def _sm_output_hook(self, module: nn.Module, inp: Any, out: Any) -> None:
         """
         Fires once per recycling iteration after the full structure module
         forward (all blocks). Captures backbone positions and states.
+        Handles both dict and dataclass outputs from HuggingFace.
         """
         key = f"recycle_{self._recycle_idx:02d}"
-        if isinstance(out, dict):
-            if "positions" in out:
-                self.backbone_positions[key] = out["positions"].detach().cpu()
-            if "frames" in out:
-                self.backbone_frames[key] = out["frames"].detach().cpu()
-            if "single" in out:
-                self.sm_states[key] = out["single"].detach().cpu()
+        fields = self._extract_from_output(out)
 
+        if "positions" in fields:
+            self.backbone_positions[key] = fields["positions"].detach().cpu()
+        if "frames" in fields:
+            self.backbone_frames[key] = fields["frames"].detach().cpu()
+        if "single" in fields:
+            self.sm_states[key] = fields["single"].detach().cpu()
+
+        # Always reset block counter and advance recycle counter,
+        # regardless of whether we captured any data.
         self._recycle_idx += 1
         self._block_idx = 0
 
