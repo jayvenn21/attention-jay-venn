@@ -244,11 +244,6 @@ if __name__ == "__main__":
         sys.exit(1)
     print("All checks passed.")
 
-import os
-import subprocess
-import sys
-import torch
-
 
 def test_esmfold_backend_smoke(tmp_path):
     output_dir = tmp_path / "test_trace_ci"
@@ -381,6 +376,7 @@ def test_esmfold_backend_smoke(tmp_path):
     if ipa_candidates:
         sample_ipa = torch.load(ipa_candidates[0], map_location="cpu")
         assert len(sample_ipa.shape) >= 3
+
 
 def test_esmfold_full_validation(tmp_path):
     output_dir = tmp_path / "test_trace_ci"
