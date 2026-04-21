@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import torch
 
+from vizfold.backends.base import BackendBase
 from vizfold.backends.esmfold.hooks import ESMFoldTraceCollector, StructureModuleTraceCollector
 from vizfold.backends.esmfold.schema import _read_fasta_and_hash
 from vizfold.backends.esmfold.trace_adapter import (
@@ -82,7 +83,7 @@ def read_fasta(fasta_path: str) -> Tuple[str, str, str]:
     return seq, seq_id, fasta_hash
 
 
-class ESMFoldRunner:
+class ESMFoldRunner(BackendBase):
     """
     Runs ESMFold inference and writes VizFold-compatible output.
 
@@ -109,7 +110,56 @@ class ESMFoldRunner:
         self._model = None
         self._tokenizer = None
 
-    def load_model(self) -> Any:
+    # --- BackendBase interface ---
+
+    def load_model(
+        self,
+        model_name: Optional[str] = None,
+        device: Optional[str] = None,
+        dtype: Optional[str] = None,
+        **kwargs: Any,
+    ) -> Any:
+        """Load the model. Returns the model object."""
+        if model_name is not None:
+            self.model_name = model_name
+        if device is not None:
+            self.device = device
+        if dtype is not None:
+            self.dtype = dtype
+        return self._load_model()
+
+    def run_inference(
+        self,
+        fasta_path: str,
+        out_dir: str,
+        trace_cfg: Optional[Dict[str, Any]] = None,
+        **kwargs: Any,
+    ) -> Dict[str, Any]:
+        """Run inference and optionally write traces (BackendBase interface)."""
+        trace_mode = "attention+activations"
+        top_k = 50
+        if trace_cfg:
+            trace_mode = trace_cfg.get("trace_mode", trace_mode)
+            top_k = trace_cfg.get("top_k", top_k)
+        return self.run(
+            fasta_path=fasta_path,
+            out_dir=out_dir,
+            trace_mode=trace_mode,
+            top_k=top_k,
+            **kwargs,
+        )
+
+    def supports_attention(self) -> bool:
+        """Whether this backend can extract attention maps."""
+        return True
+
+    def supports_activations(self) -> bool:
+        """Whether this backend can extract layer activations (hidden states)."""
+        return True
+
+    # --- Internal model loading ---
+
+    def _load_model(self) -> Any:
         if self._model is not None:
             return self._model
         if self.seed is not None:
@@ -168,7 +218,7 @@ class ESMFoldRunner:
                 "Attention storage is N^2; consider --layers 0,1 or --trace_mode activations."
             )
 
-        model = self.load_model()
+        model = self._load_model()
         tokenizer = self._tokenizer
         want_attn = "attention" in trace_mode
         want_act = "activations" in trace_mode
@@ -180,6 +230,7 @@ class ESMFoldRunner:
             want_activations=want_act,
             layer_indices=layer_list,
             head_indices=head_list,
+            expected_seq_len=seq_len,
         )
 
         # Tokenize (HF ESMFold: add_special_tokens=False per standard usage)
@@ -440,6 +491,9 @@ def _coords_to_minimal_pdb(coords: torch.Tensor, seq: str) -> str:
     for i in range(min(ca.shape[0], len(seq))):
         a = ca[i].float().cpu().numpy()
         res3 = AA_1TO3.get(seq[i], "UNK")
+        # PDB ATOM format: columns 1-6 record type, 7-11 serial, 13-16 name,
+        # 17 altLoc, 18-20 resName, 22 chainID, 23-26 resSeq, 27 iCode,
+        # 31-38 x, 39-46 y, 47-54 z, 55-60 occupancy, 61-66 tempFactor
         lines.append(
             f"ATOM  {i+1:5d}  CA  {res3:>3s} A{i+1:4d}    "
             f"{a[0]:8.3f}{a[1]:8.3f}{a[2]:8.3f}  1.00  0.00           C"

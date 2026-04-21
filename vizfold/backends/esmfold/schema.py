@@ -25,7 +25,7 @@ def _git_head(repo_path: Optional[str] = None) -> Optional[str]:
 def _read_fasta_and_hash(path: str) -> Tuple[str, str]:
     with open(path) as f:
         raw = f.read()
-    lines = [l.strip() for l in raw.splitlines() if l.strip() and not l.startswith(">")]
+    lines = [line.strip() for line in raw.splitlines() if line.strip() and not line.startswith(">")]
     seq = "".join(lines)
     h = hashlib.sha256(raw.encode()).hexdigest()[:16]
     return seq, h

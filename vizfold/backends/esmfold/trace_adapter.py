@@ -85,10 +85,8 @@ def write_traces(
 
     for key, t in collector.attention.items():
         path = os.path.join(attn_dir, f"{key}.pt")
-        if head_indices is not None and t.dim() >= 3:
-            # Attention shape: [B, H, N, N] (4D) or [H, N, N] (3D)
-            head_dim = 1 if t.dim() == 4 else 0
-            t = t.index_select(head_dim, torch.tensor(head_indices, device=t.device))
+        # Head filtering is done in the hook (ESMFoldTraceCollector), so
+        # tensors here are already filtered if head_indices was specified.
         _save_tensor(path, t, save_fp16=save_fp16)
         attention_index[key] = {
             "path": os.path.relpath(path, out_dir),

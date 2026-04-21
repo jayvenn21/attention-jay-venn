@@ -37,6 +37,16 @@ mkdir -p "$OUTDIR"
 # conda activate vizfold
 
 cd "${VIZFOLD_REPO:-.}"
+
+# Sanity check: fail fast if the environment is not set up
+python -c "import torch; import transformers" 2>/dev/null || {
+    echo "ERROR: torch or transformers not importable."
+    echo "Activate your conda env before submitting, e.g.:"
+    echo "  conda activate vizfold"
+    echo "Or uncomment the module/conda lines above in this script."
+    exit 1
+}
+
 echo "FASTA=$FASTA OUTDIR=$OUTDIR TRACE_MODE=$TRACE_MODE"
 echo "Running ESMFold..."
 

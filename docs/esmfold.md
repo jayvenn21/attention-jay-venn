@@ -20,7 +20,7 @@ pip install -r requirements-esmfold.txt
 # Optional: pip install -e .  for vizfold package
 ```
 
-`requirements-esmfold.txt` includes: `transformers` (and optionally `torch` if not already installed).
+`requirements-esmfold.txt` pins `transformers>=4.36.0`. PyTorch must be installed separately.
 
 ## Run locally
 
@@ -57,6 +57,17 @@ python run_pretrained_esmf.py \
   --heads 0,1,2
 ```
 
+**Structure + IPA attention + per-recycle backbone (structure module traces):**
+
+```bash
+python run_pretrained_esmf.py \
+  --fasta examples/monomer/fasta_dir_6KWC/6KWC.fasta \
+  --out outputs/esmf_6KWC \
+  --trace_mode attention+activations \
+  --structure_traces \
+  --save_fp16
+```
+
 ## Output layout
 
 After a run, `--out` contains:
@@ -75,7 +86,25 @@ outputs/esmf_6KWC/
     activations/
       layer_000.pt
       ...
-    index.json           # Maps layer/head to path, dtype, shape
+    trunk/                # Evoformer intermediates (per-block + final)
+      block_000_seq.pt    # [L, C_s]  per-block sequence state (last recycle)
+      block_000_pair.pt   # [L, L, C_z]  per-block pair state (last recycle)
+      ...
+      s_s.pt              # [L, C_s]  final trunk single representations
+      s_z.pt              # [L, L, C_z]  final trunk pair representations
+    structure_module/     # Only with --structure_traces
+      ipa_attention/
+        recycle_00_block_00.pt   # IPA attention [H, N, N]
+        ...
+      backbone/
+        recycle_00_positions.pt  # Per-recycle backbone coords
+        recycle_00_states.pt     # Per-recycle single representations
+        ...
+    summary.json          # Per-layer attention entropy, sparsity, norms
+    index.json            # Maps layer/head to path, dtype, shape
+  attention_files/
+    msa_row_attn_layer0.txt   # VizFold text format (top-k per head)
+    ...
   logs.txt               # Log lines from the run
 ```
 
@@ -86,7 +115,8 @@ Includes:
 - `backend`, `model_name`, `date_time`, `device`, `dtype`
 - `sequence_length`, `input_fasta_hash`, `input_fasta_path`
 - `layer_count`, `head_count`, `trace_mode`, `tensor_format` (fp16/fp32)
-- `shapes_recorded`: per-file shapes for attention and activations
+- `trace_formats`: which output formats were produced (`pt`, `txt`)
+- `shapes_recorded`: per-file shapes for attention, activations, trunk, and structure module
 - `seed`, `deterministic` (if set)
 - `repo_commit` (if run from a git repo)
 
