@@ -1,16 +1,52 @@
-# React + Vite
+# VizFold Interactive Dashboard
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+This is the frontend interface for the VizFold protein visualization pipeline. It is built with React and Vite, designed to connect to the PyTorch/ESMFold backend to visualize 3D structures and internal neural network attention mechanisms in real-time.
 
-Currently, two official plugins are available:
+## Features
+* **Interactive 3D Viewer:** WebGL-accelerated protein rendering using 3Dmol.js, featuring confidence-based (pLDDT) coloring and clickable residue targeting.
+* **Trace Explorer:** Dynamic heatmaps using Plotly.js to visualize ESM-2 Attention layers and Trunk Evolution (s_z) recycling iterations.
+* **Synchronized Targeting:** Clicking physical amino acids on the 3D model draws spatial contact crosshairs directly onto the attention heatmaps.
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+## How to Run and Test
 
-## React Compiler
+### 1. Start the Backend
+The frontend requires the FastAPI bridge and test data to function.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+1. Navigate to the root of the repository in your terminal.
+2. Activate your Python environment (e.g., `openfold_env`).
+3. Generate the required test tensors and PDB files:
+   ```bash
+   python3 run_test.py
+   ```
+4. Start the FastAPI server:
+   ```bash
+   # Default (uses test_output/ directory)
+   python3 server.py
 
-## Expanding the ESLint configuration
+   # Custom directory
+   python3 server.py --dir your_custom_directory_path
+   ```
 
-If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and [`typescript-eslint`](https://typescript-eslint.io) in your project.
+### 2. Start the Frontend
+Open a separate terminal window and navigate into the `frontend` directory.
+
+1. Install Node dependencies:
+   ```bash
+   npm install
+   ```
+2. Configure the environment variables:
+   Create a `.env` file in the `frontend` directory and add the backend API URL:
+   ```env
+   VITE_API_URL=http://localhost:8000
+   ```
+3. Start the development server:
+   ```bash
+   npm run dev
+   ```
+
+### 3. Verification Steps
+Open your browser to the local URL provided by Vite.
+
+1. **Structure Viewer:** Ensure the 3D nanobody model loads correctly and the default "Color: Confidence" setting displays a blue core.
+2. **Timeline & Traces:** Switch the Trace Explorer to "ESM-2 Attention" and scrub the slider. Verify the heatmap matrix updates without throwing 404 errors in the console.
+3. **Crosshair Targeting:** Click any amino acid on the 3D model. Verify that the residue label pops up and a targeting crosshair instantly appears on the Plotly heatmap.

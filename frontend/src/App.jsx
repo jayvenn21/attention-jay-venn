@@ -4,6 +4,8 @@ import PlotComponent from 'react-plotly.js'
 const Plot = PlotComponent.default || PlotComponent;
 import './App.css'
 
+const API_BASE = import.meta.env.VITE_API_URL ?? 'http://localhost:8000';
+
 function App() {
   const [meta, setMeta] = useState(null)
   
@@ -24,11 +26,11 @@ function App() {
 
   // 1. Fetch Meta and PDB on load
   useEffect(() => {
-    axios.get('http://localhost:8000/meta')
+    axios.get(`${API_BASE}/meta`)
       .then(response => setMeta(response.data))
       .catch(error => console.error("Error fetching meta:", error))
 
-    axios.get(`http://localhost:8000/structure?t=${Date.now()}`)
+    axios.get(`${API_BASE}/structure?t=${Date.now()}`)
       .then(response => setPdbText(response.data))
       .catch(error => console.error("Error fetching PDB:", error))
   }, [])
@@ -38,35 +40,27 @@ function App() {
     if (!meta) return;
 
     if (viewMode === 'evolution') {
-      axios.get(`http://localhost:8000/tensor/activations/recycle_${iteration}_s_z`)
+      axios.get(`${API_BASE}/tensor/activations/recycle_${iteration}_s_z`)
         .then(response => {
-          const tensor3D = response.data.data;
-          const matrix2D = tensor3D.map(row => 
-            row.map(channels => channels.reduce((a, b) => a + b, 0) / channels.length)
-          );
-          setHeatmapData(matrix2D);
+          // Backend already averaged across channels
+          setHeatmapData(response.data.data);
         })
-        .catch(() => setHeatmapData([[0]]))
+        .catch(() => {
+          console.log(`No data for iteration ${iteration}`);
+          setHeatmapData([[0]]); 
+        })
     } 
     else if (viewMode === 'attention') {
       const layerStr = layer.toString().padStart(3, '0');
-      axios.get(`http://localhost:8000/tensor/attention/layer_${layerStr}`)
+      axios.get(`${API_BASE}/tensor/attention/layer_${layerStr}`)
         .then(response => {
-          const allHeads = response.data.data[0]; 
-          const numHeads = allHeads.length;
-          const N = allHeads[0].length;
-          const averagedMatrix = Array(N).fill(0).map(() => Array(N).fill(0));
-          
-          for (let h = 0; h < numHeads; h++) {
-            for (let i = 0; i < N; i++) {
-              for (let j = 0; j < N; j++) {
-                averagedMatrix[i][j] += allHeads[h][i][j] / numHeads;
-              }
-            }
-          }
-          setHeatmapData(averagedMatrix);
+          // Backend already averaged across all attention heads
+          setHeatmapData(response.data.data);
         })
-        .catch(() => setHeatmapData([[0]]))
+        .catch(() => {
+          console.log(`No data for layer ${layerStr}`);
+          setHeatmapData([[0]]);
+        })
     }
   }, [iteration, layer, viewMode, meta])
 
@@ -164,7 +158,7 @@ function App() {
         {viewMode === 'evolution' ? (
           <>
             <h2>Recycling Iterations</h2>
-            <input type="range" min="0" max={meta ? 4 : 0} value={iteration} onChange={(e) => setIteration(parseInt(e.target.value))} style={{ width: '60%', margin: '0 20px' }} />
+            <input type="range" min="0" max={meta ? 3 : 0} value={iteration} onChange={(e) => setIteration(parseInt(e.target.value))} style={{ width: '60%', margin: '0 20px' }} />
             <span>Iteration: {iteration}</span>
           </>
         ) : (
